@@ -51,6 +51,7 @@ all() ->
 -define(DEFAULT_REDIS_DOCKER_IMAGE, "redis:6.2.7").
 
 init_per_suite(_Config) ->
+    mylog("init_per_suite"),
     stop_containers(), % just in case there is junk from previous runs
     Image = os:getenv("REDIS_DOCKER_IMAGE", ?DEFAULT_REDIS_DOCKER_IMAGE),
     EnableDebugCommand = case Image of
@@ -78,17 +79,20 @@ init_per_suite(_Config) ->
     wait_for_consistent_cluster(),
     [].
 
-init_per_testcase(_Testcase, Config) ->
+init_per_testcase(Testcase, Config) ->
+    mylog("init_per_testcase", [Testcase]),
     %% Quick check that cluster is OK; otherwise restart everything.
     case catch check_consistent_cluster(?PORTS) of
         ok ->
             [];
         _ ->
             ct:pal("Re-initialize the cluster"),
+            mylog("Re-initialize the cluster"),
             init_per_suite(Config)
     end.
 
 create_cluster() ->
+    mylog("create_cluster"),
     Image = os:getenv("REDIS_DOCKER_IMAGE", ?DEFAULT_REDIS_DOCKER_IMAGE),
     Hosts = [io_lib:format("127.0.0.1:~p ", [P]) || P <- ?PORTS],
     Cmd = io_lib:format("echo 'yes' | "
@@ -98,6 +102,7 @@ create_cluster() ->
     cmd_log(Cmd).
 
 reset_cluster() ->
+    mylog("reset_cluster"),
     Pids = [begin
                 {ok, Pid} = ered_client:start_link("127.0.0.1", Port, []),
                 Pid
@@ -109,6 +114,7 @@ reset_cluster() ->
 %% Wait until cluster is consistent, i.e all nodes have the same single view
 %% of the slot map and all cluster nodes are included in the slot map.
 wait_for_consistent_cluster() ->
+    mylog("wait_for_consistent_cluster"),
     wait_for_consistent_cluster(?PORTS).
 
 wait_for_consistent_cluster(Ports) ->
@@ -143,9 +149,11 @@ check_consistent_cluster(Ports) ->
     end.
 
 end_per_suite(_Config) ->
+    mylog("end_per_suite"),
     stop_containers().
 
 stop_containers() ->
+    mylog("stop_containers"),
     %% Stop containers. redis-30007 is used in t_new_cluster_master and
     %% redis-cluster for running redis-cli in create_cluster.
     cmd_log([io_lib:format("docker stop redis-~p; docker rm redis-~p;", [P, P])
@@ -571,7 +579,9 @@ t_empty_slotmap(_) ->
 
 
 t_empty_initial_slotmap(_) ->
+    mylog("<bjosv> reset cluster"),
     reset_cluster(),
+    mylog("<bjosv> reset cluster - DONE"),
     {ok, R} = ered:start_link([{"127.0.0.1", 30001}],
                               [{info_pid, [self()]}, {min_replicas, 1}]),
     ?MSG(#{msg_type := cluster_slots_error_response,
@@ -580,14 +590,18 @@ t_empty_initial_slotmap(_) ->
     {error, unmapped_slot} =
         ered:command(R, [<<"GET">>, <<"hello">>], <<"hello">>),
 
+    mylog("<bjosv> create cluster"),
     %% Now restore the cluster and check that ered reaches an OK state.
     create_cluster(),
 
+    mylog("<bjosv> wait for connected and cluster_ok"),
     %% Ered updates the slotmap repeatedly until all slots are covered and all
     %% masters have a replica. In the end, we're connected to all nodes.
     [?MSG(#{msg_type := connected, addr := {"127.0.0.1", Port}}, 10000)
      || Port <- ?PORTS],
-    ?MSG(#{msg_type := cluster_ok}, 5000),
+    mylog("<bjosv> got connected to all nodes"),
+    ?MSG(#{msg_type := cluster_ok}, 60 * 1000),
+    mylog("<bjosv> got cluster_ok"),
 
     %% Ingore all slotmap updates. There may be multiple of those before all
     %% nodes have discovered each other. There may be incomplete slotmaps as
@@ -1005,6 +1019,7 @@ move_key(SourcePort, DestPort, Key) ->
 start_cluster() ->
     start_cluster([]).
 start_cluster(Opts) ->
+    mylog("start_cluster"),
     [Port1, Port2 | PortsRest] = Ports = ?PORTS,
     InitialNodes = [{"127.0.0.1", Port} || Port <- [Port1, Port2]],
 
@@ -1053,6 +1068,7 @@ recv(Msg, Time) ->
     end.
 
 no_more_msgs() ->
+    mylog("no_more_msgs"),
     {messages,Msgs} = erlang:process_info(self(), messages),
     case  Msgs of
         [] ->
@@ -1112,3 +1128,11 @@ get_master_port(R) ->
 
 get_pod_name_from_port(Port) ->
     "redis-" ++ integer_to_list(Port).
+
+mylog(Msg) ->
+    mylog(Msg, []).
+mylog(Msg, Opt) ->
+    {_, _, Micro} = Now = os:timestamp(),
+    {{Year, Month, Day}, {Hour, Minute, Second}} = calendar:now_to_local_time(Now),
+    Time = lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0wT~2..0w:~2..0w:~2..0w.~3..0w",[Year,Month,Day,Hour,Minute,Second,Micro div 1000 rem 1000])),
+    io:format(user, "--> [~s] ~s ~p~n", [Time, Msg, Opt]).

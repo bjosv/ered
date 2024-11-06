@@ -233,6 +233,7 @@ handle_info(Msg = {connection_status, {Pid, Addr, _Id}, Status}, State0) ->
     State1 = case Status of
                  {connection_down, {Reason, _}} when Reason =:= socket_closed;
                                                      Reason =:= connect_error ->
+                     mylog("connection_down CLOSED", [Reason, Addr]),
                      %% Avoid triggering the alarm for a socket closed by the
                      %% peer. The cluster will be marked down on the node down
                      %% timeout.
@@ -251,12 +252,15 @@ handle_info(Msg = {connection_status, {Pid, Addr, _Id}, Status}, State0) ->
                              NewState
                      end;
                  {connection_down, node_deactivated} ->
+                     mylog("connection_down node_deactivated", [Addr]),
                      State#st{reconnecting = sets:del_element(Addr, State#st.reconnecting)};
-                 {connection_down,_} ->
+                 {connection_down, Msg} ->
+                     mylog("connection_down DOWN", [Addr, Msg]),
                      State#st{up = sets:del_element(Addr, State#st.up),
                               pending = sets:del_element(Addr, State#st.pending),
                               reconnecting = sets:del_element(Addr, State#st.reconnecting)};
                  connection_up ->
+                     mylog("connection_up", [Addr]),
                      State#st{up = sets:add_element(Addr, State#st.up),
                               pending = sets:del_element(Addr, State#st.pending),
                               reconnecting = sets:del_element(Addr, State#st.reconnecting)};
@@ -277,6 +281,7 @@ handle_info(Msg = {connection_status, {Pid, Addr, _Id}, Status}, State0) ->
     end;
 
 handle_info({slot_info, Version, Response, FromAddr}, State) ->
+    mylog("send_slot_info_request response", [Response]),
     case Response of
         _ when Version < State#st.slot_map_version ->
             %% got a response for a request triggered for an old version of the slot map, ignore
@@ -296,6 +301,7 @@ handle_info({slot_info, Version, Response, FromAddr}, State) ->
             NewMap = ered_lib:slotmap_sort(ClusterSlotsReply),
             case NewMap == State#st.slot_map of
                 true ->
+                    mylog(" - Reply is same as previous, ignoring..", []),
                     {noreply, update_cluster_state(State)};
                 false ->
                     Nodes = ered_lib:slotmap_all_nodes(NewMap),
@@ -335,6 +341,7 @@ handle_info({slot_info, Version, Response, FromAddr}, State) ->
 handle_info({converged, Result, FromAddr, Version},
             State = #st{convergence_check = {ongoing, Pending, Timeout},
                         slot_map_version = Version}) ->
+    mylog("start_convergence_check converged", [Result]),
     case Result of
         true ->
             Pending1 = sets:del_element(FromAddr, Pending),
@@ -359,6 +366,7 @@ handle_info({timeout, TimerRef, {time_to_update_slots,PreferredNodes}}, State) -
             {noreply, start_periodic_slot_info_request(PreferredNodes,
                                                        State#st{slot_timer_ref = none})};
         TimerRef ->
+            mylog("slotmap update timer: TIMEOUT and CLUSTER OK"),
             {noreply, State#st{slot_timer_ref = none}};
         _ ->
             {noreply, State}
@@ -366,10 +374,12 @@ handle_info({timeout, TimerRef, {time_to_update_slots,PreferredNodes}}, State) -
 
 handle_info({timeout, TimerRef, start_convergence_check},
             State = #st{convergence_check = {scheduled, TimerRef}}) ->
+    mylog("start_convergence_check timeout, start", []),
     {noreply, start_convergence_check(State)};
 
 handle_info({timeout, TimerRef, cancel_convergence_check},
             State = #st{convergence_check = {scheduled, TimerRef}}) ->
+    mylog("start_convergence_check timeout, cancel", []),
     cancel_convergence_check(State),
     State1 = State#st{convergence_check = nok},
     {noreply, update_cluster_state(State1)};
@@ -379,6 +389,7 @@ handle_info({timeout, TimerRef, {close_clients, Remove}}, State) ->
     ToCloseNow = [Addr ||
                      {Addr, Tref} <- maps:to_list(maps:with(Remove, State#st.closing)),
                      Tref == TimerRef],
+    mylog("close_clients timeout, close", [ToCloseNow]),
     Clients = maps:with(ToCloseNow, State#st.nodes),
     [ered_client_sup:stop_client(State#st.client_sup, Client)
      || Client <- maps:keys(Clients)],
@@ -438,10 +449,13 @@ update_cluster_state(State) ->
     update_cluster_state(check_cluster_status(State), State).
 
 update_cluster_state(ClusterStatus, State) ->
+    mylog(io_lib:format("update_cluster_state~n        status=~p~n        state=~p~n        nodes=~p~n        up=~p~n        masters=~p~n        pending=~p~n        closing=~p",
+                        [ClusterStatus, State#st.cluster_state, maps:to_list(State#st.nodes), sets:to_list(State#st.up), sets:to_list(State#st.masters), sets:to_list(State#st.pending), sets:to_list(State#st.closing)])),
     case {ClusterStatus, State#st.cluster_state} of
         {ok, nok} when State#st.convergence_check =:= ok ->
             ered_info_msg:cluster_ok(State#st.info_pid),
             State1 = stop_periodic_slot_info_request(State),
+            mylog("cluster_state = OK !!!!"),
             State1#st{cluster_state = ok};
         {ok, nok} ->
             State1 = stop_periodic_slot_info_request(State),
@@ -449,10 +463,12 @@ update_cluster_state(ClusterStatus, State) ->
                 {ongoing, _, _} ->
                     State1;
                 _Otherwise ->
+                    mylog("cluster state nok, start convergance check"),
                     start_convergence_check(State1)
             end;
         {ok, ok} when State#st.convergence_check =:= nok ->
             State1 = stop_periodic_slot_info_request(State),
+            mylog("cluster state=ok, convergence_check=nok, start convergance check"),
             schedule_convergence_check(State1);
         {ok, ok} ->
             %% Convergence check is ok or scheduled or ongoing.
@@ -462,6 +478,7 @@ update_cluster_state(ClusterStatus, State) ->
         {_, ok} ->
             ered_info_msg:cluster_nok(ClusterStatus, State#st.info_pid),
             State1 = start_periodic_slot_info_request(State),
+            mylog("cluster_state = NOT OK !!!!"),
             State1#st{cluster_state = nok};
         {_, nok} ->
             start_periodic_slot_info_request(State)
@@ -478,12 +495,14 @@ start_periodic_slot_info_request(State) ->
 start_periodic_slot_info_request(PreferredNodes, State) ->
     case State#st.slot_timer_ref of
         none ->
+            mylog("start_periodic_slot_info_request", [PreferredNodes]),
             case pick_node(PreferredNodes, State) of
                 none ->
                     %% All nodes are unavailable. Connect to the init nodes to
                     %% see if they are available. If they are hostnames that map
                     %% to IP addresses and all IP addresses of the cluster have
                     %% changed, then this helps us rediscover the cluster.
+                    mylog("Add initial nodes", [State#st.initial_nodes]),
                     State1 = start_clients(State#st.initial_nodes, State),
                     start_update_slots_timer([], State1);
                 Node ->
@@ -491,6 +510,7 @@ start_periodic_slot_info_request(PreferredNodes, State) ->
                     start_update_slots_timer(lists:delete(Node, PreferredNodes), State)
             end;
         _Else ->
+            mylog("start_periodic_slot_info_request ONGOING", [PreferredNodes]),
             State
     end.
 
@@ -506,11 +526,13 @@ stop_periodic_slot_info_request(State) ->
         none ->
             State;
         Tref ->
+            mylog("slotmap update timer: STOP"),
             erlang:cancel_timer(Tref),
             State#st{slot_timer_ref = none}
     end.
 
 send_slot_info_request(Addr, State) ->
+    mylog("send_slot_info_request", [Addr]),
     Node = maps:get(Addr, State#st.nodes),
     Pid = self(),
     Cb = fun(Answer) -> Pid ! {slot_info, State#st.slot_map_version, Answer, Addr} end,
@@ -532,6 +554,7 @@ start_convergence_check(State = #st{convergence_check_timeout = 0}) ->
     %% Check disabled. Mark convergence as being ok.
     update_cluster_state(State#st{convergence_check = ok});
 start_convergence_check(State) ->
+    mylog("start_convergence_check"),
     cancel_convergence_check(State),
     AddrSet = State#st.masters,
     ClusterPid = self(),
@@ -656,9 +679,11 @@ start_clients(Addrs, State) ->
         lists:foldl(fun (Addr, {Nodes, Closing}) ->
                             case maps:find(Addr, Nodes) of
                                 error ->
+                                    mylog("start_clients start=~p", Addr),
                                     Pid = start_client(Addr, State),
                                     {Nodes#{Addr => Pid}, Closing};
                                 {ok, Pid} ->
+                                    mylog("start_clients reactivate=~p", Addr),
                                     ered_client:reactivate(Pid),
                                     {Nodes, maps:remove(Addr, Closing)}
                             end
@@ -671,3 +696,11 @@ start_clients(Addrs, State) ->
                                   sets:subtract(new_set(maps:keys(NewNodes)),
                                                 State#st.up)),
              closing = NewClosing}.
+
+mylog(Msg) ->
+    mylog(Msg, []).
+mylog(Msg, Opt) ->
+    {_, _, Micro} = Now = os:timestamp(),
+    {{Year, Month, Day}, {Hour, Minute, Second}} = calendar:now_to_local_time(Now),
+    Time = lists:flatten(io_lib:format("~4..0w-~2..0w-~2..0wT~2..0w:~2..0w:~2..0w.~3..0w",[Year,Month,Day,Hour,Minute,Second,Micro div 1000 rem 1000])),
+    io:format(user, "--> [~s] ~s ~p~n", [Time, Msg, Opt]).
