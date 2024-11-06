@@ -254,8 +254,8 @@ handle_info(Msg = {connection_status, {Pid, Addr, _Id}, Status}, State0) ->
                  {connection_down, node_deactivated} ->
                      mylog("connection_down node_deactivated", [Addr]),
                      State#st{reconnecting = sets:del_element(Addr, State#st.reconnecting)};
-                 {connection_down, Msg} ->
-                     mylog("connection_down DOWN", [Addr, Msg]),
+                 {connection_down, DownMsg} ->
+                     mylog("connection_down DOWN", [Addr, DownMsg]),
                      State#st{up = sets:del_element(Addr, State#st.up),
                               pending = sets:del_element(Addr, State#st.pending),
                               reconnecting = sets:del_element(Addr, State#st.reconnecting)};
